@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# docker -> podman shim for the agent (rootless Podman, no Docker daemon). Install it as
+# /opt/agent-bench/bin/docker and put that folder first on the agent's PATH (see systemd/).
+# Everything goes to podman, except `docker pull <image>` for an image that is already in local
+# storage (e.g. localhost/agent-bench-toolchain:1, never pushed): that exits 0 without contacting a
+# registry.
+set -euo pipefail
+
+if [ "${1:-}" = pull ]; then
+  # The image is the last argument (flags such as --platform come before it).
+  img="${*: -1}"
+  if podman image exists "$img" 2>/dev/null; then
+    exit 0
+  fi
+fi
+
+exec podman "$@"

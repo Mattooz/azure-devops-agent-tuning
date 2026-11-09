@@ -1,0 +1,24 @@
+# Variant A: Azure Pipelines agent on the host, as a systemd user unit (rootless Podman, your user).
+# Jobs run their steps in containers, through the docker->podman shim in /opt/agent-bench/bin.
+# Install: ~/.config/systemd/user/agent-bench-a-agent.service, then
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-bench-a-agent
+[Unit]
+Description=agent-bench A Azure Pipelines agent (bench-a-containerjob)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-bench/agents/a-1
+Environment=PATH=/opt/agent-bench/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGENT_USE_NODE20_IN_UNSUPPORTED_SYSTEM=true
+Environment=AGENT_USE_NODE24_IN_UNSUPPORTED_SYSTEM=true
+ExecStart=/opt/agent-bench/agents/a-1/run.sh
+Restart=always
+RestartSec=10
+# Limits the agent process only; the job containers need --cpus/--memory in container.options.
+CPUQuota=600%
+MemoryMax=16G
+
+[Install]
+WantedBy=default.target

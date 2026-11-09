@@ -1,0 +1,26 @@
+# Benchmark B, mix: the agent inside the toolchain container (pool bench-b-agentincontainer, no
+# container job). The steps are the same as in a-mix.yml.
+#
+# Placeholders to replace: <github-service-connection>, <owner>/<app-repo>, <owner>/<backend-repo>,
+# as in a-mix.yml.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: app
+      type: github
+      endpoint: <github-service-connection>
+      name: <owner>/<app-repo>
+      ref: refs/heads/main
+    - repository: backend
+      type: github
+      endpoint: <github-service-connection>
+      name: <owner>/<backend-repo>
+      ref: refs/heads/main
+
+extends:
+  template: templates/mix.yml
+  parameters:
+    pool: bench-b-agentincontainer
+    container: ''

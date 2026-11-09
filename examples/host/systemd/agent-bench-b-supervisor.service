@@ -1,0 +1,23 @@
+# Variant B: supervisor of warm ephemeral agent containers (pool bench-b-agentincontainer).
+# Install: ~/.config/systemd/user/agent-bench-b-supervisor.service, and the variables of
+# /opt/agent-bench/supervisor.env (ADO_ORG_URL, ADO_POOL_ID, ADO_POOL_NAME), then
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-bench-b-supervisor
+# KillMode=process: on stop only the script gets SIGTERM; its trap stops the containers gracefully
+# (so they deregister). Containers survive a supervisor crash and are adopted by label on restart.
+[Unit]
+Description=agent-bench B supervisor (bench-b-agentincontainer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/agent-bench/supervisor.env
+Environment=N=2
+ExecStart=/opt/agent-bench/bin/supervisor.sh
+KillMode=process
+TimeoutStopSec=180
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

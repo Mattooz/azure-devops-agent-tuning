@@ -1,0 +1,387 @@
+# Benchmark "mix": a spread of jobs typical of an application repository and a backend repository
+# (npm ci, type check, unit tests, build and publish an artifact; cargo fmt; migrations on
+# PostgreSQL; Python lint and tests; a small Rust crate), then a verify stage that downloads the
+# artifact once per fanout value, and a report. It is not a copy of a CI: it measures what many jobs
+# and steps cost on each agent variant.
+#
+# The entry files (a-mix.yml, b-mix.yml) pass the agent variant: pool, and for the container-job
+# variant the container image and its options. Every job is the same in both variants.
+#
+# The two repositories, declared as resources in the entry files:
+#   app      an npm app (Svelte, Vite, or any other): scripts `check`, `test:unit`, `build`, and a
+#            `dist/` folder after the build. Change the script names below if yours differ.
+#   backend  a repository with a Cargo workspace (cargo fmt), SQL migrations in `sqlDir`, and Python
+#            code (ruff, pytest) in its root. Any of these may be missing: delete the job.
+#
+# fanout: the verify jobs, one per value.
+parameters:
+  - name: pool
+    type: string
+  - name: container
+    type: string
+    default: ''
+  # Options of the job container (docker create), only with a container: the entry files of the
+  # container-job variant pass what the host's runtime needs.
+  - name: containerOptions
+    type: string
+    default: ''
+  - name: appRepo
+    type: string
+    default: app
+  - name: backendRepo
+    type: string
+    default: backend
+  # Folders inside the checkouts (each checkout goes to s/<name> under the pipeline workspace).
+  - name: appDir
+    type: string
+    default: s/app
+  - name: backendDir
+    type: string
+    default: s/backend
+  # Folder of the SQL migrations, relative to backendDir; applied in filename order.
+  - name: sqlDir
+    type: string
+    default: db/migrations
+  - name: fanout
+    type: object
+    default: [1, 2, 3]
+
+stages:
+  - stage: build
+    displayName: build (independent jobs)
+    variables:
+      CARGO_TERM_COLOR: always
+      APP_DIR: $(Pipeline.Workspace)/${{ parameters.appDir }}
+      BACKEND_DIR: $(Pipeline.Workspace)/${{ parameters.backendDir }}
+      SQL_DIR: $(BACKEND_DIR)/${{ parameters.sqlDir }}
+      # This folder holds these benchmark files. The self checkout below puts the whole repository
+      # in s/bench; if you copy examples/pipelines into your own repository, change this path.
+      BENCH_DIR: $(Pipeline.Workspace)/s/bench/examples/pipelines
+      RUST_SMALL_DIR: $(BENCH_DIR)/bench/rust-small
+      CARGO_HOME: $(Pipeline.Workspace)/cargo-home
+      npm_config_cache: $(Pipeline.Workspace)/.npm
+    jobs:
+      - job: app_install
+        displayName: app install (npm ci, ls)
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.appRepo }}
+            path: ${{ parameters.appDir }}
+          - task: Cache@2
+            displayName: cache npm
+            inputs:
+              key: 'npm | app | $(APP_DIR)/package-lock.json'
+              restoreKeys: 'npm | app'
+              path: $(npm_config_cache)
+          - script: |
+              npm ci --no-fund --no-audit
+              npm ls --depth=0 | tail
+            workingDirectory: $(APP_DIR)
+            displayName: npm ci, ls
+
+      - job: app_check
+        displayName: app check (type check)
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.appRepo }}
+            path: ${{ parameters.appDir }}
+          - task: Cache@2
+            displayName: cache npm
+            inputs:
+              key: 'npm | app | $(APP_DIR)/package-lock.json'
+              restoreKeys: 'npm | app'
+              path: $(npm_config_cache)
+          - script: npm ci --no-fund --no-audit
+            workingDirectory: $(APP_DIR)
+            displayName: npm ci
+          - script: npm run check
+            workingDirectory: $(APP_DIR)
+            displayName: type check
+
+      - job: app_unit
+        displayName: app unit tests
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.appRepo }}
+            path: ${{ parameters.appDir }}
+          - task: Cache@2
+            displayName: cache npm
+            inputs:
+              key: 'npm | app | $(APP_DIR)/package-lock.json'
+              restoreKeys: 'npm | app'
+              path: $(npm_config_cache)
+          - script: npm ci --no-fund --no-audit
+            workingDirectory: $(APP_DIR)
+            displayName: npm ci
+          - script: npm run test:unit
+            workingDirectory: $(APP_DIR)
+            displayName: test:unit
+
+      # The build needs no other repository (the API contract is committed in the app), so the
+      # whole build runs in this job. The artifact is what the verify jobs download.
+      - job: app_build
+        displayName: app build and package
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.appRepo }}
+            path: ${{ parameters.appDir }}
+          - task: Cache@2
+            displayName: cache npm
+            inputs:
+              key: 'npm | app | $(APP_DIR)/package-lock.json'
+              restoreKeys: 'npm | app'
+              path: $(npm_config_cache)
+          - script: npm ci --no-fund --no-audit
+            workingDirectory: $(APP_DIR)
+            displayName: npm ci
+          - script: npm run build
+            workingDirectory: $(APP_DIR)
+            displayName: build
+          - script: |
+              set -euo pipefail
+              out="$(Build.ArtifactStagingDirectory)/app-dist"
+              mkdir -p "$out"
+              tar -czf "$out/app-dist.tar.gz" -C dist .
+              cd "$out" && sha256sum app-dist.tar.gz > app-dist.tar.gz.sha256
+              ls -l "$out"
+            workingDirectory: $(APP_DIR)
+            displayName: package dist
+          - task: PublishPipelineArtifact@1
+            displayName: publish app-dist
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/app-dist
+              artifact: app-dist
+
+      - job: backend_fmt
+        displayName: backend fmt (cargo fmt --check)
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.backendRepo }}
+            path: ${{ parameters.backendDir }}
+          - script: |
+              rustc --version
+              cargo --version
+            displayName: toolchain
+          - script: cargo fmt --all --check
+            workingDirectory: $(BACKEND_DIR)
+            displayName: cargo fmt --check
+
+      - job: backend_migrations
+        displayName: backend migrations on PostgreSQL
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: self
+            path: s/bench
+          - checkout: ${{ parameters.backendRepo }}
+            path: ${{ parameters.backendDir }}
+          # Starts a throwaway PostgreSQL 17 as the job's user; sets DATABASE_URL.
+          - script: bash $(BENCH_DIR)/scripts/start-postgres.sh
+            displayName: test Postgres
+          - script: |
+              set -euo pipefail
+              # Plain SQL files, applied in filename order (the order most migration tools use).
+              n=0
+              while IFS= read -r f; do
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+                n=$((n + 1))
+              done < <(find "$SQL_DIR" -name '*.sql' | sort)
+              echo "applied $n migrations"
+            displayName: apply migrations
+          - script: |
+              psql "$DATABASE_URL" -c '\dt'
+              psql "$DATABASE_URL" -At -c "select count(*) from information_schema.tables where table_schema = 'public'"
+            displayName: tables
+          - script: bash $(BENCH_DIR)/scripts/start-postgres.sh stop
+            condition: always()
+            displayName: stop Postgres
+
+      - job: backend_python
+        displayName: backend python checks (ruff, pytest)
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: ${{ parameters.backendRepo }}
+            path: ${{ parameters.backendDir }}
+          # uv is in the toolchain image. `uv run` creates the environment from pyproject.toml when
+          # there is one; --with adds the tools for either case. Commit uv.lock and use `uv sync
+          # --locked` for reproducible runs.
+          - script: |
+              set -euo pipefail
+              uv run --with ruff ruff check .
+              uv run --with ruff ruff format --check .
+              uv run --with pytest pytest -q
+            workingDirectory: $(BACKEND_DIR)
+            displayName: ruff, pytest
+
+      - job: rust_small
+        displayName: rust small crate (build, test, clippy)
+        timeoutInMinutes: 15
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - checkout: self
+            path: s/bench
+          - script: |
+              rustc --version
+              cargo --version
+            displayName: toolchain
+          - task: Cache@2
+            displayName: cache target (rust-small)
+            inputs:
+              key: 'rust | small | $(RUST_SMALL_DIR)/Cargo.toml'
+              restoreKeys: 'rust | small'
+              path: $(RUST_SMALL_DIR)/target
+          - task: Cache@2
+            displayName: cache cargo home (rust-small)
+            inputs:
+              key: 'cargo | small | $(RUST_SMALL_DIR)/Cargo.toml'
+              restoreKeys: 'cargo | small'
+              path: $(CARGO_HOME)
+          # Cargo.lock is committed; the step is for a checkout that lost it.
+          - script: |
+              set -euo pipefail
+              if [ ! -f Cargo.lock ]; then cargo generate-lockfile; fi
+            workingDirectory: $(RUST_SMALL_DIR)
+            displayName: lockfile (if missing)
+          - script: cargo build
+            workingDirectory: $(RUST_SMALL_DIR)
+            displayName: cargo build
+          - script: cargo test
+            workingDirectory: $(RUST_SMALL_DIR)
+            displayName: cargo test
+          - script: cargo clippy -- -D warnings
+            workingDirectory: $(RUST_SMALL_DIR)
+            displayName: cargo clippy
+
+  - stage: verify
+    displayName: verify the app artifact
+    dependsOn: build
+    variables:
+      ARTIFACT_DIR: $(Pipeline.Workspace)/app-dist
+    jobs:
+      - ${{ each n in parameters.fanout }}:
+        - job: verify_${{ n }}
+          displayName: verify ${{ n }}
+          timeoutInMinutes: 15
+          pool: ${{ parameters.pool }}
+          workspace:
+            clean: all
+          ${{ if ne(parameters.container, '') }}:
+            container:
+              image: ${{ parameters.container }}
+              options: ${{ parameters.containerOptions }}
+          steps:
+            - task: DownloadPipelineArtifact@2
+              displayName: download app-dist
+              inputs:
+                artifact: app-dist
+                path: $(ARTIFACT_DIR)
+            - script: |
+                set -euo pipefail
+                cd "$(ARTIFACT_DIR)"
+                sha256sum -c app-dist.tar.gz.sha256
+                out="$(Pipeline.Workspace)/unpacked"
+                rm -rf "$out" && mkdir -p "$out"
+                tar -xzf app-dist.tar.gz -C "$out"
+                echo "files: $(find "$out" -type f | wc -l)"
+              displayName: sha256 and extract
+            - script: |
+                node -e '
+                const fs = require("fs");
+                const path = require("path");
+                const root = process.argv[1];
+                const files = [];
+                const walk = (dir) => {
+                  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const p = path.join(dir, e.name);
+                    if (e.isDirectory()) walk(p);
+                    else files.push({ p, size: fs.statSync(p).size });
+                  }
+                };
+                walk(root);
+                files.sort((a, b) => b.size - a.size);
+                for (const f of files.slice(0, 5)) console.log(String(f.size).padStart(9), path.relative(root, f.p));
+                ' "$(Pipeline.Workspace)/unpacked"
+              displayName: five largest files
+
+      - job: report
+        displayName: report
+        dependsOn:
+          - ${{ each n in parameters.fanout }}:
+            - verify_${{ n }}
+        timeoutInMinutes: 10
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        ${{ if ne(parameters.container, '') }}:
+          container:
+            image: ${{ parameters.container }}
+            options: ${{ parameters.containerOptions }}
+        steps:
+          - script: |
+              set -euo pipefail
+              out="$(Build.ArtifactStagingDirectory)/report"
+              mkdir -p "$out"
+              jq -n --arg build "$(Build.BuildId)" --arg agent "$(Agent.Name)" \
+                --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{build: $build, agent: $agent, date: $date}' > "$out/report.json"
+              cat "$out/report.json"
+            displayName: write report
+          - task: PublishPipelineArtifact@1
+            displayName: publish report
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/report
+              artifact: report

@@ -35,8 +35,10 @@ creates a `TelemetryCommandExtension`; its `PublishEvent`
 ([`Telemetry/TelemetryCommandExtension.cs` L95-L119](https://github.com/microsoft/azure-pipelines-agent/blob/v5.281.1/src/Agent.Worker/Telemetry/TelemetryCommandExtension.cs#L95-L119))
 calls `WorkerUtilities.GetVssConnection`
 ([`WorkerUtilties.cs`](https://github.com/microsoft/azure-pipelines-agent/blob/v5.281.1/src/Agent.Worker/WorkerUtilties.cs)),
-which builds a **new `VssConnection`** each time. The step waits for these asynchronous
-commands before it ends.
+which builds a **new `VssConnection`** each time, and then `connection.GetClient<…>()`
+([`CustomerIntelligenceServer.cs` L29-L33](https://github.com/microsoft/azure-pipelines-agent/blob/v5.281.1/src/Agent.Worker/Telemetry/CustomerIntelligenceServer.cs#L29-L33)).
+These two calls run **synchronously** in the step, before its command starts. The HTTP
+publish of the event itself is asynchronous, and the step does not wait for it.
 
 A new connection first needs the server's connection data (`Location.GetConnectionData`).
 The Azure DevOps client keeps it in a file cache under the user's application-data folder:

@@ -1,0 +1,30 @@
+# Benchmark A, steps: the agent on the host (pool bench-a-containerjob), every job in the container
+# localhost/agent-bench-toolchain:1 (container job). The steps are the same as in b-steps.yml.
+#
+# Placeholders to replace:
+#   <github-service-connection>  name of the GitHub service connection in your project
+#   <owner>/<repo>               the npm repository the steps check out
+#   <host-user>                  the user that runs the host agent: its HOME is the tmpfs below
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: app
+      type: github
+      endpoint: <github-service-connection>
+      name: <owner>/<repo>
+      ref: refs/heads/main
+
+extends:
+  template: templates/steps.yml
+  parameters:
+    pool: bench-a-containerjob
+    container: localhost/agent-bench-toolchain:1
+    # Rootless Podman: keep-id maps the host user (who owns the agent's work folder) to the same
+    # uid in the container, so the steps the agent runs as that uid can write the mounts; the
+    # container itself starts as root, for the agent's setup (groupadd, useradd); the agent runs
+    # every step with `-w $HOME` of that user, which the image does not have: a tmpfs. The job
+    # container gets the same limits as an agent container of variant B (podman puts it in its own
+    # cgroup, outside the agent's unit and its CPUQuota).
+    containerOptions: --userns=keep-id --user 0:0 --tmpfs /home/<host-user>:rw,exec,mode=1777 --cpus 6 --memory 14g

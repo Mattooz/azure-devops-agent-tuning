@@ -19,8 +19,36 @@ fi
 exec podman "$@"
 ```
 
-The agent always pulls the job image first; without the pull exception a locally built image
-fails the job.
+The agent pulls the job image first, and a locally built image cannot be pulled. Instead of the
+shim's exception you can mark the image as local on the container resource: `localimage: true`
+sets `SkipContainerImagePull`
+([`Agent.Sdk/ContainerInfo.cs` L52](https://github.com/microsoft/azure-pipelines-agent/blob/v5.281.1/src/Agent.Sdk/ContainerInfo.cs#L52)).
+
+```yaml
+resources:
+  containers:
+    - container: toolchain
+      image: localhost/toolchain:1
+      localimage: true
+```
+
+## Stopping the job container: Podman waits 10 s
+
+At the end of the job the agent removes the container with `docker rm --force <id>`
+([`DockerCommandManager.cs` L205-L211](https://github.com/microsoft/azure-pipelines-agent/blob/v5.281.1/src/Agent.Worker/Container/DockerCommandManager.cs#L205-L211)).
+With Docker that kills the container at once. With Podman, `rm --force` first stops it: `SIGTERM`,
+then `SIGKILL` after `--time`, **10 s by default**. The agent starts the job container with
+`tail -f /dev/null` as PID 1, and a PID 1 without a handler ignores `SIGTERM`, so every job waits
+the full timeout. Measured: **Stop Containers took ~12 s per job**.
+
+Two ways out, either one:
+
+- `--init` in `container.options`: a small init process becomes PID 1 and forwards the signal,
+  so `tail` exits at once;
+- in the shim, turn `rm --force` into `rm --force --time 0`.
+
+Expected saving: ~10 s per job. This follows from the code and from Podman's default; it has not
+been measured yet.
 
 ## Container options
 

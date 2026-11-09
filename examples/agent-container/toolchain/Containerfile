@@ -1,0 +1,89 @@
+# agent-bench-toolchain:1 - generic toolchain for the agent benchmark (npm, Rust, PostgreSQL 17,
+# Python with uv). Used as the job image of the container-job variant and as the base of the
+# agent-in-container image (agent/Containerfile).
+# Base pinned to the @playwright/test version of the npm app under test (1.64.1 here): change both
+# together, or use any noble-based Node image.
+FROM mcr.microsoft.com/playwright:v1.64.1-noble
+
+ARG NODE_VERSION=24.22.2
+ARG NODE_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+ARG RUST_TOOLCHAIN=1.99.1
+ARG RUSTUP_INIT_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+ARG UV_VERSION=0.13.7
+ARG UV_SHA256=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# CARGO_HOME is deliberately not set here: pipelines set it per job.
+ENV LANG=C.UTF-8 \
+    CARGO_TERM_COLOR=always \
+    RUSTUP_HOME=/usr/local/rustup \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/usr/lib/postgresql/17/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# PostgreSQL 17 from PGDG. postgresql-common is installed first so that
+# create_main_cluster=false is in place before postgresql-17 is configured:
+# no cluster is created, the pipeline runs its own with initdb + pg_ctl.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+    gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg /tmp/pgdg.asc; \
+    rm /tmp/pgdg.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-common; \
+    sed -i 's/^#\?create_main_cluster\s*=.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf; \
+    grep -q '^create_main_cluster = false' /etc/postgresql-common/createcluster.conf; \
+    apt-get install -y --no-install-recommends \
+        postgresql-17 \
+        git openssh-client jq zstd \
+        build-essential pkg-config libssl-dev \
+        python3 python3-venv procps; \
+    rm -rf /etc/postgresql/17/main /var/lib/postgresql/17/main; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# Node 24 from the official tarball (replaces the nodesource 26.x package of the base).
+RUN set -eux; \
+    [ "$(dpkg --print-architecture)" = amd64 ]; \
+    if dpkg -s nodejs >/dev/null 2>&1; then apt-get purge -y nodejs; fi; \
+    curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -; \
+    rm -rf /usr/local/lib/node_modules /usr/local/include/node; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
+    rm /tmp/node.tar.xz; \
+    node --version | grep -qx "v${NODE_VERSION}"; \
+    npm --version
+
+# Rust via rustup: RUSTUP_HOME and CARGO_HOME world-readable, proxies on PATH.
+RUN set -eux; \
+    curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init; \
+    echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod 0755 /tmp/rustup-init; \
+    RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
+        /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "${RUST_TOOLCHAIN}" -c rustfmt -c clippy; \
+    rm /tmp/rustup-init; \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo; \
+    rustc --version | grep -q "${RUST_TOOLCHAIN}"
+
+# cargo-nextest: prebuilt binary (latest release, as published at get.nexte.st).
+RUN set -eux; \
+    curl -fsSL https://get.nexte.st/latest/linux | tar -xz -C /usr/local/cargo/bin; \
+    chmod 0755 /usr/local/cargo/bin/cargo-nextest; \
+    cargo nextest --version
+
+# uv: official standalone binary, sha256 checked.
+RUN set -eux; \
+    curl -fsSL -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"; \
+    echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -; \
+    mkdir /tmp/uv; \
+    tar -xzf /tmp/uv.tar.gz -C /tmp/uv --strip-components=1; \
+    install -m 0755 /tmp/uv/uv /tmp/uv/uvx /usr/local/bin/; \
+    rm -rf /tmp/uv /tmp/uv.tar.gz; \
+    uv --version
+
+ENTRYPOINT []
+CMD ["bash"]

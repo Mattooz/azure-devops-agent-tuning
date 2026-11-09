@@ -1,0 +1,20 @@
+# Benchmark B, steps: the agent inside the toolchain container (pool bench-b-agentincontainer, no
+# container job). The steps are the same as in a-steps.yml.
+#
+# Placeholders to replace: <github-service-connection> and <owner>/<repo>, as in a-steps.yml.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: app
+      type: github
+      endpoint: <github-service-connection>
+      name: <owner>/<repo>
+      ref: refs/heads/main
+
+extends:
+  template: templates/steps.yml
+  parameters:
+    pool: bench-b-agentincontainer
+    container: ''

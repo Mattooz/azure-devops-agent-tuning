@@ -1,0 +1,31 @@
+# agent-bench-toolchain-agent:1: agent-in-container image (variant B). Toolchain image + Azure
+# Pipelines agent 5.281.1 + /azp/start.sh.
+#
+# The agent tarball is not downloaded at build or run time: put vsts-agent-linux-x64-<version>.tar.gz
+# and its SHA256SUMS file (the line for that tarball, from the agent's release notes) in the build
+# context, next to this Containerfile. The sha256 is re-verified here.
+#   podman build -t localhost/agent-bench-toolchain-agent:1 -f Containerfile <context-dir>
+FROM localhost/agent-bench-toolchain:1
+ARG AGENT_VERSION=5.281.1
+USER root
+COPY SHA256SUMS vsts-agent-linux-x64-${AGENT_VERSION}.tar.gz /tmp/dist/
+# noble's `ubuntu` user (uid 1000) runs the agent and the job steps. HOME=/home/ubuntu is writable.
+# If your base image uses another user, change the user here, in ENV HOME and in the chown below.
+RUN cd /tmp/dist && sha256sum -c SHA256SUMS \
+ && mkdir -p /azp/agent /azp/_work \
+ && tar -xzf vsts-agent-linux-x64-${AGENT_VERSION}.tar.gz -C /azp/agent \
+ && rm -rf /tmp/dist \
+ && chown -R ubuntu:ubuntu /azp
+COPY --chown=ubuntu:ubuntu start.sh /azp/start.sh
+# ~/.config must exist: .NET gives an empty ApplicationData folder when it does not, and the
+# Azure DevOps client then keeps no location cache, so every new connection of the agent (one per
+# telemetry event, several per step) asks the server for its connection data (~1 s each). On the
+# host of variant A the folder exists, and the cache is in ~/.config/Microsoft\VisualStudio Services.
+RUN chmod 0755 /azp/start.sh \
+ && install -d -o ubuntu -g ubuntu /home/ubuntu/.config
+USER ubuntu
+ENV HOME=/home/ubuntu \
+    AGENT_ALLOW_RUNASROOT= \
+    AZP_SECRET_FILE=/run/secrets/agent-bench-azp-token
+WORKDIR /azp/agent
+ENTRYPOINT ["/azp/start.sh"]

@@ -1,0 +1,72 @@
+# Benchmark "steps": measures the overhead of each step on each agent variant. Every job checks out
+# one npm repository (fetchDepth 1) and runs stepList's steps, each a small real command chosen by
+# its number modulo 5. The same script runs in every step of every variant, so only the per-step
+# cost differs.
+#
+# The entry files (a-steps.yml, b-steps.yml) pass the agent variant: pool, and for the container-job
+# variant the container image and its options (container: '' = no container job).
+#
+# Parameters:
+#   repo / repoDir  the repository resource declared in the entry file and the folder it is checked
+#                   out to. The repository must have package.json, package-lock.json and a src/ folder.
+#   jobs            the number of jobs (one per value, all in one stage).
+#   stepList        the steps of each job, by number (1 to 15).
+parameters:
+  - name: pool
+    type: string
+  - name: container
+    type: string
+    default: ''
+  # Options of the job container (docker create), only with a container: the entry files of the
+  # container-job variant pass what the host's runtime needs.
+  - name: containerOptions
+    type: string
+    default: ''
+  - name: repo
+    type: string
+    default: app
+  - name: repoDir
+    type: string
+    default: s/app
+  - name: jobs
+    type: object
+    default: [1, 2, 3, 4]
+  - name: stepList
+    type: object
+    default: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+stages:
+  - stage: steps
+    displayName: per-step overhead
+    variables:
+      APP_DIR: $(Pipeline.Workspace)/${{ parameters.repoDir }}
+    jobs:
+      - ${{ each j in parameters.jobs }}:
+        - job: job_${{ j }}
+          displayName: job ${{ j }}
+          timeoutInMinutes: 15
+          pool: ${{ parameters.pool }}
+          workspace:
+            clean: all
+          ${{ if ne(parameters.container, '') }}:
+            container:
+              image: ${{ parameters.container }}
+              options: ${{ parameters.containerOptions }}
+          steps:
+            - checkout: ${{ parameters.repo }}
+              path: ${{ parameters.repoDir }}
+              fetchDepth: 1
+            - ${{ each n in parameters.stepList }}:
+              - script: |
+                  set -euo pipefail
+                  case $((STEP_N % 5)) in
+                    1) git -C "$APP_DIR" log --oneline -5 ;;
+                    2) node -e 'const p = require(process.argv[1] + "/package.json"); console.log(Object.keys(p.dependencies || {}).length, "dependencies")' "$APP_DIR" ;;
+                    3) python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$APP_DIR/package-lock.json" ;;
+                    4) find "$APP_DIR/src" -type f | wc -l ;;
+                    *) jq '.scripts | keys' "$APP_DIR/package.json" ;;
+                  esac
+                env:
+                  APP_DIR: $(APP_DIR)
+                  STEP_N: '${{ n }}'
+                displayName: step ${{ n }}
